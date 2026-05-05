@@ -1,47 +1,191 @@
 
-###### make sure this is installed in the Pi first!!! ##############
- # pip install bleak paho-mqtt
-####################################################################
+#######
+# BLE data comes from the ESP32 via Bleak.
+
+# Install dependencies first:
+#   pip install bleak AWSIoTPythonSDK
+
+# Certificates expected at CERT_DIR (download from AWS IoT Console):
+#    AmazonRootCA1.pem
+#    device-cert.pem.crt
+#    private.pem.key
+#######
 
 import asyncio
 import json
-import ssl
-import paho.mqtt.client as mqtt
-from bleak import BleakClient
+import logging
+import signal
+import sys
+from datetime import datetime
 
-# --- Config ---
-ESP32_ADDRESS       = "XX:XX:XX:XX:XX:XX"   # BLE MAC from scan
-CHAR_UUID           = "abcd1234-ab12-ab12-ab12-abcdef012345"
-AWS_ENDPOINT        = "YOUR-ENDPOINT.iot.us-east-1.amazonaws.com"
-MQTT_TOPIC          = "sensors/esp32/data"
-CERT_DIR            = "/home/pi/certs"
+from AWSIoTPythonSDK.MQTTLib import AWSIoTMQTTClient
+from bleak import BleakClient, BleakError
 
-# --- MQTT setup ---
-mqtt_client = mqtt.Client(client_id="rpi-ble-bridge")
-mqtt_client.tls_set(
-    ca_certs   = f"{CERT_DIR}/AmazonRootCA1.pem",
-    certfile   = f"{CERT_DIR}/device-cert.pem",
-    keyfile    = f"{CERT_DIR}/private.pem",
-    tls_version= ssl.PROTOCOL_TLSv1_2
+# ─────────────────────────────────────────────
+#  CONFIGURATION  ← edit these values
+# ─────────────────────────────────────────────
+ESP32_ADDRESS = "XX:XX:XX:XX:XX:XX"                        # BLE MAC of your ESP32
+CHAR_UUID     = "abcd1234-ab12-ab12-ab12-abcdef012345"     # BLE characteristic UUID
+
+HOST          = "aaajhd7uhpzbd-ats.iot.us-east-1.amazonaws.com"  # your AWS endpoint
+CLIENT_ID     = "rpi-ble-hvac-bridge"
+TOPIC         = "sensors/esp32/hvac"
+
+CERT_DIR      = "/home/pi/certs/"
+CA_CERT       = f"{CERT_DIR}AmazonRootCA1.pem"
+PRIVATE_KEY   = f"{CERT_DIR}private.pem.key"
+DEVICE_CERT   = f"{CERT_DIR}device-cert.pem.crt"
+
+# Reliability tuning (mirrors the SenseHat reference code)
+BLE_RETRY_DELAY_SEC = 5
+# ─────────────────────────────────────────────
+
+# ── Logging ──────────────────────────────────
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    handlers=[
+        logging.StreamHandler(sys.stdout),
+        logging.FileHandler("/home/pi/hvac_bridge.log"),
+    ],
 )
-mqtt_client.connect(AWS_ENDPOINT, port=8883)
-mqtt_client.loop_start()
+log = logging.getLogger(__name__)
 
-# --- BLE notification handler ---
-def handle_notification(sender, data):
-    payload = data.decode("utf-8")
-    print(f"BLE received: {payload}")
-    result = mqtt_client.publish(MQTT_TOPIC, payload, qos=1)
-    print(f"MQTT publish: {'OK' if result.rc == 0 else 'FAILED'}")
+# ── Graceful-shutdown flag ────────────────────
+_shutdown = asyncio.Event()
 
-# --- Main BLE loop ---
-async def main():
-    async with BleakClient(ESP32_ADDRESS) as client:
-        print(f"Connected to {ESP32_ADDRESS}")
-        await client.start_notify(CHAR_UUID, handle_notification)
-        print("Listening for notifications (Ctrl+C to stop)...")
-        while True:
-            await asyncio.sleep(1)
+def _handle_signal(*_):
+    log.info("Shutdown signal received.")
+    _shutdown.set()
+
+
+# ─────────────────────────────────────────────
+#  AWS IoT CLIENT  
+# ─────────────────────────────────────────────
+
+def build_aws_client() -> AWSIoTMQTTClient:
+   
+    # Configure and connect the AWSIoTMQTTClient.
+    # Mirrors the SenseHat reference code configuration exactly.
+    
+    client = AWSIoTMQTTClient(CLIENT_ID)
+    client.configureEndpoint(HOST, 8883)
+    client.configureCredentials(CA_CERT, PRIVATE_KEY, DEVICE_CERT)
+
+    # ── Same settings as the SenseHat reference code ──
+    client.configureAutoReconnectBackoffTime(1, 32, 20)  # min=1s, max=32s, stable=20s
+    client.configureOfflinePublishQueueing(-1)           # infinite offline queue
+    client.configureDrainingFrequency(2)                 # drain at 2 Hz
+    client.configureConnectDisconnectTimeout(10)         # 10 sec
+    client.configureMQTTOperationTimeout(5)              # 5 sec
+
+    log.info(f"Connecting to AWS IoT Core at {HOST} …")
+    client.connect()
+    log.info("AWS IoT Core connected.")
+    return client
+
+
+# ─────────────────────────────────────────────
+#  PAYLOAD HELPERS
+# ─────────────────────────────────────────────
+
+# Sequence counter (same as loopCount in reference code)
+_sequence = 0
+
+def build_payload(raw: str) -> str:
+   
+    # Parse the raw BLE string and build an enriched JSON payload.
+    # Matches the payload structure from the SenseHat reference code:
+    #  { sequence, timestamp, ...sensor fields }
+
+    # The ESP32 should send JSON like:
+    # {"temp": 22.5, "humidity": 60, "pressure": 1013}
+    # If it sends a plain value, it's wrapped as {"value": <raw>}.
+   
+    global _sequence
+
+    try:
+        sensor_data = json.loads(raw)
+        if not isinstance(sensor_data, dict):
+            sensor_data = {"value": sensor_data}
+    except (json.JSONDecodeError, ValueError):
+        sensor_data = {"raw": raw}
+
+    payload = {
+        "sequence":  _sequence,
+        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),  # pandas-friendly
+        "device_id": CLIENT_ID,
+        **sensor_data,   # spread in temp / humidity / pressure / etc.
+    }
+    _sequence += 1
+    return json.dumps(payload)
+
+
+# ─────────────────────────────────────────────
+#  BLE BRIDGE
+# ─────────────────────────────────────────────
+
+async def run_ble_bridge(aws_client: AWSIoTMQTTClient) -> None:
+    
+    # Connect to the ESP32 over BLE and stream every notification to AWS.
+    # Automatically retries the BLE connection if it drops.
+
+    def handle_notification(sender, data: bytearray) -> None:
+        try:
+            raw = data.decode("utf-8").strip()
+        except UnicodeDecodeError:
+            log.warning(f"Non-UTF-8 BLE data: {data.hex()}")
+            return
+
+        message_json = build_payload(raw)
+        aws_client.publish(TOPIC, message_json, 1)
+        log.info(f"Published to {TOPIC}: {message_json}")
+
+    while not _shutdown.is_set():
+        try:
+            log.info(f"Attempting BLE connection to {ESP32_ADDRESS} …")
+            async with BleakClient(ESP32_ADDRESS) as ble:
+                log.info(f"BLE connected to {ESP32_ADDRESS}")
+                await ble.start_notify(CHAR_UUID, handle_notification)
+                log.info("Subscribed — streaming to AWS IoT Core. Press Ctrl+C to stop.")
+
+                while not _shutdown.is_set() and ble.is_connected:
+                    await asyncio.sleep(1)
+
+                await ble.stop_notify(CHAR_UUID)
+
+        except BleakError as exc:
+            log.error(f"BLE error: {exc}")
+        except asyncio.CancelledError:
+            break
+        except Exception as exc:
+            log.exception(f"Unexpected error: {exc}")
+
+        if not _shutdown.is_set():
+            log.info(f"Retrying BLE in {BLE_RETRY_DELAY_SEC}s …")
+            await asyncio.sleep(BLE_RETRY_DELAY_SEC)
+
+
+# ─────────────────────────────────────────────
+#  ENTRY POINT
+# ─────────────────────────────────────────────
+
+async def async_main() -> None:
+    loop = asyncio.get_running_loop()
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        loop.add_signal_handler(sig, _handle_signal)
+
+    log.info("=== Transportation HVAC IoT — Pi BLE Bridge starting ===")
+
+    aws_client = build_aws_client()
+
+    try:
+        await run_ble_bridge(aws_client)
+    finally:
+        log.info("Disconnecting from AWS IoT Core …")
+        aws_client.disconnect()
+        log.info("Bridge shut down cleanly.")
+
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    asyncio.run(async_main())
