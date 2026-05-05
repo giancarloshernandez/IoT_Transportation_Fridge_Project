@@ -5,6 +5,7 @@
 #include "Adafruit_SHT31.h"
 #include <TinyGPS++.h>
 #include <NimBLEDevice.h>
+#include <math.h>
 
 #define SERVICE_UUID        "12345678-1234-1234-1234-123456789abc"
 #define CHARACTERISTIC_UUID "abcd1234-ab12-ab12-ab12-abcdef012345"
@@ -13,6 +14,12 @@ NimBLECharacteristic* pCharacteristic;
 
 unsigned long lastSensorRead = 0;
 const long interval = 5000;
+
+int tempAlarm = 0;
+int humidAlarm = 0;
+int doorAlarm = 0;
+int movAlarm = 0;
+int systemAlarm = 0;
 
 //Magnet
 const int reedPin = 14;
@@ -92,96 +99,141 @@ if (! sht31.begin(0x44)) {   // Set to 0x45 for alternate i2c addr
 
 void loop() {
 
-  //Temp and Humidity
   unsigned long currentMillis = millis();
+
+  //GPS
+  while (ss.available() > 0) {
+    gps.encode(ss.read()); 
+  }
+  ///////////////////////////////////////////////////////////////////////////
+
+  //Temp and Humidity
   if (currentMillis - lastSensorRead >= interval) {
     lastSensorRead = currentMillis;
     float t = sht31.readTemperature();
     float h = sht31.readHumidity();
 
-    if (! isnan(t)) {  // check if 'is not a number'
-      Serial.print("Temp *C = "); Serial.print(t); Serial.print("\t\t");
-    } else { 
-      Serial.println("Failed to read temperature");
+    if(t > 4.44){ //40*F FDA Danger Zone
+      tempAlarm = 1;
+      Serial.print("High Temperature: ");
+      Serial.print(t);
+      Serial.print("*C - ALARM TRIGGERED \t\t");
     }
-    
-    if (! isnan(h)) {  // check if 'is not a number'
+    else {
+      tempAlarm = 0;
+      if (! isnan(t)) {  // check if 'is not a number'
+      Serial.print("Temp *C = "); Serial.print(t); Serial.print("\t\t");
+      } 
+      else { 
+      Serial.println("Failed to read temperature");
+      }
+    }
+
+    if(h > 85){ //Too high for meats
+      humidAlarm = 1;
+      Serial.print("High Humidity: ");
+      Serial.print(h);
+      Serial.print("% - ALARM TRIGGERED \t\t");
+    }
+    else{
+      humidAlarm = 0;
+      if (! isnan(h)) {  // check if 'is not a number'
       Serial.print("Hum. % = "); Serial.println(h);
-    } else { 
+      } 
+      else { 
       Serial.println("Failed to read humidity");
+      }
     }
   //////////////////////////////////////////////////////////////////////
 
   //IMU
     sensors_event_t a, g, temp;
     mpu.getEvent(&a, &g, &temp);
+    float ax = a.acceleration.x;
+    float ay = a.acceleration.y;
+    float az = a.acceleration.z;
 
-    Serial.print("AccelX:");
-    Serial.print(a.acceleration.x);
-    Serial.print(",");
-    Serial.print("AccelY:");
-    Serial.print(a.acceleration.y);
-    Serial.print(",");
-    Serial.print("AccelZ:");
-    Serial.print(a.acceleration.z);
-    Serial.print(", ");
-    Serial.print("GyroX:");
-    Serial.print(g.gyro.x);
-    Serial.print(",");
-    Serial.print("GyroY:");
-    Serial.print(g.gyro.y);
-    Serial.print(",");
-    Serial.print("GyroZ:");
-    Serial.print(g.gyro.z);
-    Serial.println("");
+    float totalAcc = sqrt(ax * ax + ay * ay + az * az);
+    float gForce = totalAcc / 9.81;
+
+    if (gForce > 1.5){
+      movAlarm = 1;
+      Serial.print("Harsh Movement Detected. Total Acceleration: ");
+      Serial.print(gForce);
+      Serial.print("g - ALARM TRIGGERED \t\t");
+    }
+
+    else{
+      movAlarm = 0;
+      Serial.print("AccelX:");
+      Serial.print(ax);
+      Serial.print(",");
+      Serial.print("AccelY:");
+      Serial.print(ay);
+      Serial.print(",");
+      Serial.print("AccelZ:");
+      Serial.print(az);
+      Serial.println("");
+    }
     //////////////////////////////////////////////////////////////////////////
     //Magnet
     int reedState = digitalRead(reedPin);
     if (reedState == LOW) {
       Serial.println("Door Closed"); 
       doorState = 0;
+      doorAlarm = 0;
     }
     else {
-      Serial.println("Door Open");
+      Serial.println("Door Open - ALARM TRIGGERED \t\t");
       doorState = 1;
+      doorAlarm = 1;
     }
     //////////////////////////////
     //BLE
+    displayGPSInfo();
+    if(tempAlarm == 1 || humidAlarm == 1 || doorAlarm == 1 || movAlarm == 1){
+      systemAlarm = 1;
+      }
+
+    else{
+      systemAlarm = 0;
+      }
+
     String payload = "{";
     payload += "\"t\":" + String(t,1) + ",";
     payload += "\"h\":" + String(h,1) + ",";
-    payload += "\"ax\":" + String(a.acceleration.x,2) + ",";
-    payload += "\"ay\":" + String(a.acceleration.y,2) + ",";
-    payload += "\"az\":" + String(a.acceleration.z,2) + ",";
-    payload += "\"gx\":" + String(g.gyro.x,2) + ",";
-    payload += "\"gy\":" + String(g.gyro.y,2) + ",";
-    payload += "\"gz\":" + String(g.gyro.z,2) + ",";
-    payload += "\"d\":" + String(doorState) + ",";
+    //payload += "\"ax\":" + String(a.acceleration.x,2) + ",";
+    //payload += "\"ay\":" + String(a.acceleration.y,2) + ",";
+    //payload += "\"az\":" + String(a.acceleration.z,2) + ",";
+    //payload += "\"d\":" + String(doorState) + ",";
 
-    if (gps.location.isValid()) {
-      payload += "\"lat\":" + String(gps.location.lat(), 6) + ",";
-      payload += "\"lng\":" + String(gps.location.lng(), 6) + ",";
-      payload += "\"spd\":" + String(gps.speed.mph(), 1);
-    } else {
-      payload += "\"gps\":0";
-    }
-  
-    payload += "}";
-
-    pCharacteristic->setValue(payload.c_str());
-    pCharacteristic->notify();  // Push to connected clients
-
-    Serial.println("Sent: " + payload);
-  }
-  //GPS
-  while (ss.available() > 0) {
-    if (gps.encode(ss.read())) {
-      if (currentMillis - lastSensorRead >= interval) {
-      displayGPSInfo();
+    if(systemAlarm == 1){
+      payload += "\"A\":1,";
+      if (gps.location.isValid()) {
+        payload += "\"lat\":" + String(gps.location.lat(), 6) + ",";
+        payload += "\"lng\":" + String(gps.location.lng(), 6) + ",";
+        payload += "\"spd\":" + String(gps.speed.mph(), 1) + ",";
+      } 
+      else {
+        payload += "\"gps\":0,";
       }
+
+      payload += "\"tA\":" + String(tempAlarm) + ",";
+      payload += "\"hA\":" + String(humidAlarm) + ",";
+      payload += "\"dA\":" + String(doorAlarm) + ",";
+      payload += "\"mA\":" + String(movAlarm);
     }
+
+    else{
+      payload += "\"A\":" + String(systemAlarm);
+    }
+      payload += "}";
+
+      pCharacteristic->setValue(payload.c_str());
+      pCharacteristic->notify();  // Push to connected clients
+
+      Serial.println("Sent: " + payload);
   }
-  ///////////////////////////////////////////////////////////////////////////
 }
 
 
