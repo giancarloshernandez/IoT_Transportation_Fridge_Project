@@ -113,7 +113,7 @@ void loop() {
     float t = sht31.readTemperature();
     float h = sht31.readHumidity();
 
-    if(t > 4.44){ //40*F FDA Danger Zone
+    if(t > 27){ //4.4*C = 40*F FDA Danger Zone
       tempAlarm = 1;
       Serial.print("High Temperature: ");
       Serial.print(t);
