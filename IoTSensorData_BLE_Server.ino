@@ -20,6 +20,8 @@ int humidAlarm = 0;
 int doorAlarm = 0;
 int movAlarm = 0;
 int systemAlarm = 0;
+int gForceFlag = 0;
+float gForcePrintVal = 0;
 
 //Magnet
 const int reedPin = 14;
@@ -107,6 +109,22 @@ void loop() {
   }
   ///////////////////////////////////////////////////////////////////////////
 
+  //Imu
+  sensors_event_t a, g, temp;
+    mpu.getEvent(&a, &g, &temp);
+    float ax = a.acceleration.x;
+    float ay = a.acceleration.y;
+    float az = a.acceleration.z;
+
+    float totalAcc = sqrt(ax * ax + ay * ay + az * az);
+    float gForce = totalAcc / 9.81;
+   
+    if (gForce > 1.5){
+      gForceFlag = 1;
+      gForcePrintVal = gForce;
+    }
+    ///////////////////////////
+
   //Temp and Humidity
   if (currentMillis - lastSensorRead >= interval) {
     lastSensorRead = currentMillis;
@@ -147,19 +165,12 @@ void loop() {
   //////////////////////////////////////////////////////////////////////
 
   //IMU
-    sensors_event_t a, g, temp;
-    mpu.getEvent(&a, &g, &temp);
-    float ax = a.acceleration.x;
-    float ay = a.acceleration.y;
-    float az = a.acceleration.z;
 
-    float totalAcc = sqrt(ax * ax + ay * ay + az * az);
-    float gForce = totalAcc / 9.81;
-
-    if (gForce > 1.5){
+    if (gForceFlag == 1){
       movAlarm = 1;
+      gForceFlag = 0;
       Serial.print("Harsh Movement Detected. Total Acceleration: ");
-      Serial.print(gForce);
+      Serial.print(gForcePrintVal);
       Serial.print("g - ALARM TRIGGERED \t\t");
     }
 
