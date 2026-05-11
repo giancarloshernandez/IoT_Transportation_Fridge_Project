@@ -9,7 +9,7 @@ from AWSIoTPythonSDK.MQTTLib import AWSIoTMQTTClient
 from bleak import BleakClient, BleakError
 
 # ─────────────────────────────────────────────
-#  CONFIGURATION  ← edit these values
+#  CONFIGURATION
 # ─────────────────────────────────────────────
 ESP32_ADDRESS = "F4:2D:C9:71:10:AE"                        # BLE MAC of your ESP32
 CHAR_UUID     = "abcd1234-ab12-ab12-ab12-abcdef012345"     # BLE characteristic UUID
