@@ -1,16 +1,3 @@
-
-#######
-# BLE data comes from the ESP32 via Bleak.
-
-# Install dependencies first:
-#   pip install bleak AWSIoTPythonSDK
-
-# Certificates expected at CERT_DIR (download from AWS IoT Console):
-#    AmazonRootCA1.pem
-#    device-cert.pem.crt
-#    private.pem.key
-#######
-
 import asyncio
 import json
 import logging
@@ -24,17 +11,17 @@ from bleak import BleakClient, BleakError
 # ─────────────────────────────────────────────
 #  CONFIGURATION  ← edit these values
 # ─────────────────────────────────────────────
-ESP32_ADDRESS = "XX:XX:XX:XX:XX:XX"                        # BLE MAC of your ESP32
+ESP32_ADDRESS = "F4:2D:C9:71:10:AE"                        # BLE MAC of your ESP32
 CHAR_UUID     = "abcd1234-ab12-ab12-ab12-abcdef012345"     # BLE characteristic UUID
 
-HOST          = "aaajhd7uhpzbd-ats.iot.us-east-1.amazonaws.com"  # your AWS endpoint
-CLIENT_ID     = "rpi-ble-hvac-bridge"
-TOPIC         = "sensors/esp32/hvac"
+HOST          = "a34l9n2bhgxips-ats.iot.us-east-2.amazonaws.com"  # your AWS endpoint
+CLIENT_ID     = "GianPi"
+TOPIC         = "IoTProject"
 
-CERT_DIR      = "/home/pi/certs/"
-CA_CERT       = f"{CERT_DIR}AmazonRootCA1.pem"
-PRIVATE_KEY   = f"{CERT_DIR}private.pem.key"
-DEVICE_CERT   = f"{CERT_DIR}device-cert.pem.crt"
+CERT_DIR      = "/home/giancarlos/cert/"
+CA_CERT       = f"{CERT_DIR}RootCA1.pem"
+PRIVATE_KEY   = f"{CERT_DIR}GianPi-private.pem.key"
+DEVICE_CERT   = f"{CERT_DIR}GianPi-cert.pem.crt"
 
 # Reliability tuning (mirrors the SenseHat reference code)
 BLE_RETRY_DELAY_SEC = 5
@@ -46,7 +33,7 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(message)s",
     handlers=[
         logging.StreamHandler(sys.stdout),
-        logging.FileHandler("/home/pi/hvac_bridge.log"),
+        logging.FileHandler("/home/giancarlos/hvac_bridge.log"),
     ],
 )
 log = logging.getLogger(__name__)
